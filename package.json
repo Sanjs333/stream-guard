@@ -1,0 +1,6 @@
+{
+    "name": "stream-guard",
+    "version": "1.0.0",
+    "type": "module",
+    "description": "Server-side streaming backup for crash recovery"
+}

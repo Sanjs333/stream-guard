@@ -12,7 +12,7 @@ const activeStreams = new Map();
 const backups = new Map();
 const MAX_AGE = 30 * 60 * 1000;
 const CLEANUP_INTERVAL = 60 * 1000;
-const STREAM_IDLE_TIMEOUT = 3 * 60 * 1000;
+const STREAM_IDLE_TIMEOUT = 5 * 60 * 1000;
 const STREAM_MAX_DURATION = 30 * 60 * 1000;
 let cleanupTimer = null;
 
@@ -96,15 +96,10 @@ export async function init(router) {
       if (isIdle || isTooLong) {
         const rawData = v.chunks.join("");
         const text = extractTextFromSSE(rawData);
-        if (isIdle) {
-          console.warn(
-            `[StreamGuard] ⚠️ 流已无响应 (${idleSeconds}秒未收到新数据，总耗时${totalMinutes}分钟)`,
-          );
-        } else {
-          console.warn(
-            `[StreamGuard] ⚠️ 流超出最大时长限制 (已运行${totalMinutes}分钟)`,
-          );
-        }
+        const idleMinutes = Math.max(1, Math.round(idleSeconds / 60));
+        const reason = isIdle
+          ? `这次回复已经 ${idleMinutes} 分钟没有任何新内容了`
+          : `这次回复已经持续了 ${totalMinutes} 分钟还没结束`;
         if (text && text.trim().length > 0) {
           backups.set(v.userId, {
             text,
@@ -112,10 +107,12 @@ export async function init(router) {
             timestamp: Date.now(),
           });
           console.warn(
-            `[StreamGuard] 已从中断的流中保存 ${text.length}字 的备份，刷新页面后可恢复`,
+            `[StreamGuard] ${reason}，应该是卡住了。已经帮你存好 ${text.length} 字的备份，可刷新酒馆页面，刷新后会自动弹出恢复提示`,
           );
         } else {
-          console.warn(`[StreamGuard] 中断的流中无可用文本内容`);
+          console.warn(
+            `[StreamGuard] ${reason}，应该是卡住了，但暂时没能从这次回复里提取出可恢复的文字。可以刷新页面后重新生成`,
+          );
         }
         activeStreams.delete(k);
       }
@@ -135,6 +132,10 @@ export async function exit() {
 }
 
 function instrumentResponse(req, res) {
+  const url = req.url || "";
+  if (!/backends|generate|completion|\/chat\/|\/v1\//i.test(url)) {
+    return;
+  }
   const origWrite = res.write;
   const origEnd = res.end;
   const origWriteHead = res.writeHead;
@@ -198,6 +199,28 @@ function instrumentResponse(req, res) {
     }
     return false;
   }
+  res.on("close", () => {
+    if (isSSE && streamId && activeStreams.has(streamId)) {
+      const stream = activeStreams.get(streamId);
+      activeStreams.delete(streamId);
+      try {
+        const rawData = stream.chunks.join("");
+        const text = extractTextFromSSE(rawData);
+        if (text && text.trim().length > 0) {
+          backups.set(stream.userId, {
+            text,
+            textLength: text.length,
+            timestamp: Date.now(),
+          });
+          console.log(
+            `[StreamGuard] 🔌 客户端断开，已结算备份 (${text.length}字)`,
+          );
+        }
+      } catch (e) {
+        console.error("[StreamGuard] 客户端断开时结算失败:", e);
+      }
+    }
+  });
 
   res.writeHead = function () {
     const rest = Array.prototype.slice.call(arguments, 1);
